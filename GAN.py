@@ -6,17 +6,19 @@ import matplotlib.pyplot as plt
 import torchvision
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
+from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device("cpu")
 if torch.cuda.is_available():
     device = torch.device("cuda")
-batch = 32
+    
+batch = 16
 
 dataset = torchvision.datasets.ImageFolder("data", transforms.Compose([
     transforms.ToTensor(),
 ]))
 
-dataloader = DataLoader(dataset=dataset, batch_size=batch, shuffle=True, pin_memory=True, num_workers=6,)
+dataloader = DataLoader(dataset=dataset, batch_size=batch, shuffle=True, pin_memory=True, num_workers=6,drop_last=True)
 
 class Generator(nn.Module):
     def __init__(self):
@@ -101,7 +103,6 @@ def weights_init(m):
         nn.init.constant_(m.bias.data, 0)
 
 def train(dataloader, epoch):
-    static_noise = torch.randn(1,100, device=device)
 
     Dnet = Discriminator()
     Dnet.train()
@@ -116,36 +117,47 @@ def train(dataloader, epoch):
     print(Gnet)
 
     criterion = nn.BCELoss().to(device=device)
-    optimD = optim.Adam(Dnet.parameters(), lr=0.01)
-    optimG = optim.Adam(Gnet.parameters(), lr=0.0003)
+    optimD = optim.Adam(Dnet.parameters(), lr=0.0003,betas=(0.5,0.999))
+    optimG = optim.Adam(Gnet.parameters(), lr=0.0003,betas=(0.5,0.999))
+
+    static_noise = torch.randn(batch, 100, device=device)
+    writer = SummaryWriter()
+    writer.add_images("TestImages/base", Gnet(static_noise).cpu(), 0, dataformats='NCHW')
 
     for i in range(epoch):
+        print(f"epoch: {i+1}")
         for image, _ in tqdm(dataloader):
             image = image.to(device=device)
-            label_fake = torch.full((batch, 1), 0.0 , dtype=torch.float, device=device)
-            label_real = torch.full((batch, 1), 1.0 , dtype=torch.float, device=device)
 
-            Dnet.zero_grad()
-            Dout = Dnet(image)
-            loss = criterion(Dout, label_real) 
-            loss.backward()
+            Dout = Dnet(image).reshape(-1)
+            loss_real = criterion(Dout, torch.ones_like(Dout)) 
 
-            noise = torch.randn(32, 100, device=device)
+            noise = torch.randn(batch, 100, device=device)
             Gout = Gnet(noise)
-            Dout = Dnet(Gout.detach())
-            loss = criterion(Dout, label_fake)
-            loss.backward()
+            Dout = Dnet(Gout.detach()).reshape(-1)
+            loss_fake = criterion(Dout, torch.zeros_like(Dout))   
+            for param in Dnet.parameters():
+                param.grad = None
+            loss = (loss_fake + loss_real)/2
+            loss.backward(retain_graph = True)
             optimD.step()
             
-
-            Gnet.zero_grad()
-            Gout = Dnet(Gout)
-            loss_fake = criterion(Gout,label_real)
-            loss_fake.backward()
+            Dout = Dnet(Gout).reshape(-1)
+            loss = criterion(Dout,torch.zeros_like(Dout))
+            for param in Gnet.parameters():
+                param.grad = None
+            loss.backward()
             optimG.step()
-        plt.imshow(Gnet(static_noise)[0].permute(1,2,0).cpu().detach().numpy())
-        plt.show()
+        writer.add_images(f"TestImages/epoch-{i +1}", Gnet(static_noise).cpu(), i+1, dataformats='NCHW')
+    
+    writer.flush()
+    writer.close()
+    return Gnet
 
+def start():
+    model = train(dataloader, 3)
+    PATH = './model/Gnet.pth'
+    torch.save(model, PATH)
             
 if __name__ == "__main__":
-    train(dataloader,1)
+    start()
