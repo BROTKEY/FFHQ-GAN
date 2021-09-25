@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
+PATH = './model/Gnet.pth'
+
 device = torch.device("cpu")
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -47,7 +49,6 @@ class Generator(nn.Module):
             nn.BatchNorm2d(8),
             nn.LeakyReLU(),
             nn.ConvTranspose2d(8,3,4,2,1),
-            nn.BatchNorm2d(3),
             nn.Sigmoid(),
         )
     
@@ -117,47 +118,74 @@ def train(dataloader, epoch):
     print(Gnet)
 
     criterion = nn.BCELoss().to(device=device)
-    optimD = optim.Adam(Dnet.parameters(), lr=0.0003,betas=(0.5,0.999))
-    optimG = optim.Adam(Gnet.parameters(), lr=0.0003,betas=(0.5,0.999))
+    optimD = optim.AdamW(Dnet.parameters(), lr=0.0003,betas=(0.5,0.999))
+    optimG = optim.AdamW(Gnet.parameters(), lr=0.0003,betas=(0.5,0.999))
 
     static_noise = torch.randn(batch, 100, device=device)
-    writer = SummaryWriter()
-    writer.add_images("TestImages/base", Gnet(static_noise).cpu(), 0, dataformats='NCHW')
+    tensorboard_step = 0
+    writer = SummaryWriter("runs/GAN/test")
+    with torch.no_grad():
+        test = Gnet(static_noise).cpu()
+        test_grid = torchvision.utils.make_grid(
+            test[:batch], normalize=True
+        )
+        writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
+        tensorboard_step += 1
 
     for i in range(epoch):
         print(f"epoch: {i+1}")
+        iter = 0
         for image, _ in tqdm(dataloader):
             image = image.to(device=device)
-
-            Dout = Dnet(image).reshape(-1)
-            loss_real = criterion(Dout, torch.ones_like(Dout)) 
-
             noise = torch.randn(batch, 100, device=device)
-            Gout = Gnet(noise)
-            Dout = Dnet(Gout.detach()).reshape(-1)
-            loss_fake = criterion(Dout, torch.zeros_like(Dout))   
+            fake = Gnet(noise)
+
+            disc_real = Dnet(image).reshape(-1)
+            loss_real = criterion(disc_real, torch.ones_like(disc_real)) 
+            disc_fake = Dnet(fake).reshape(-1)
+            loss_fake = criterion(disc_fake, torch.zeros_like(disc_fake))
+            loss = (loss_fake + loss_real)/2   
             for param in Dnet.parameters():
                 param.grad = None
-            loss = (loss_fake + loss_real)/2
             loss.backward(retain_graph = True)
             optimD.step()
             
-            Dout = Dnet(Gout).reshape(-1)
-            loss = criterion(Dout,torch.zeros_like(Dout))
+            Dout = Dnet(fake).reshape(-1)
+            loss_Gnet = criterion(Dout,torch.ones_like(Dout))
             for param in Gnet.parameters():
                 param.grad = None
-            loss.backward()
+            loss_Gnet.backward()
             optimG.step()
-        writer.add_images(f"TestImages/epoch-{i +1}", Gnet(static_noise).cpu(), i+1, dataformats='NCHW')
+            iter += 1
+
+            if iter%100 == 0:
+                with torch.no_grad():
+                    test = Gnet(static_noise).cpu()
+                    test_grid = torchvision.utils.make_grid(
+                        test[:batch], normalize=True
+                    )
+                    writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
+                    tensorboard_step += 1
+        print("saving...")            
+        torch.save(Gnet, PATH)    
+        writer.flush()
+        print("saved")
+
+    with torch.no_grad():
+        test = Gnet(static_noise).cpu()
+        test_grid = torchvision.utils.make_grid(
+            test[:batch], normalize=True
+        )
+        writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
+        tensorboard_step += 1
+        
     
     writer.flush()
     writer.close()
-    return Gnet
+    torch.save(Gnet, PATH)
 
 def start():
-    model = train(dataloader, 3)
-    PATH = './model/Gnet.pth'
-    torch.save(model, PATH)
+    train(dataloader, 10)
             
 if __name__ == "__main__":
     start()
