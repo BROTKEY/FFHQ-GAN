@@ -1,5 +1,5 @@
 # FFHQ-GAN
-FFHQ traineable GAN
+FFHQ traineable WGAN
 
 ## dataset:
 https://github.com/NVlabs/ffhq-dataset

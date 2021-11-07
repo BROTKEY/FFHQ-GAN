@@ -8,7 +8,6 @@ import torchvision
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
 
 PATH = './model/'
 
@@ -139,8 +138,6 @@ def train(dataloader, epoch, load=False):
 
     optim_critic = optim.RMSprop(critic.parameters(), lr=0.00005)
     optim_generator = optim.RMSprop(generator.parameters(), lr=0.00005)
-
-    static_noise = torch.randn((BATCH, 100, 1, 1), device=DEVICE)
     tensorboard_step = 0
     writer = SummaryWriter("runs/GAN/test")
 
