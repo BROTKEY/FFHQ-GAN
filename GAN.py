@@ -1,191 +1,225 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torchvision.transforms.transforms import Resize
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torchvision
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
+import numpy as np
 
-PATH = './model/Gnet.pth'
+PATH = './model/'
 
-device = torch.device("cpu")
 if torch.cuda.is_available():
-    device = torch.device("cuda")
-    
-batch = 16
+    DEVICE = torch.device("cuda")
+else:
+    DEVICE = torch.device("cpu")
 
-dataset = torchvision.datasets.ImageFolder("data", transforms.Compose([
+BATCH = 32
+
+IMAGESIZE = 256
+
+DATASET = torchvision.datasets.ImageFolder("data", transforms.Compose([
     transforms.ToTensor(),
+    transforms.Resize(IMAGESIZE),
+    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ]))
 
-dataloader = DataLoader(dataset=dataset, batch_size=batch, shuffle=True, pin_memory=True, num_workers=6,drop_last=True)
+DATALOADER = DataLoader(dataset=DATASET, batch_size=BATCH,
+                        shuffle=True, pin_memory=True, num_workers=6, drop_last=True)
+
 
 class Generator(nn.Module):
-    def __init__(self):
+    def __init__(self, image_size):
         super(Generator, self).__init__()
-        self.form = nn.Linear(100,16384)
-        self.seq = nn.Sequential(
-            nn.ConvTranspose2d(1024,512,4,2,1),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(512,256,4,2,1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(256,128,4,2,1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(128,64,4,2,1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(64,32,4,2,1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(32,16,4,2,1),
-            nn.BatchNorm2d(16),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(16,8,4,2,1),
-            nn.BatchNorm2d(8),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,3,4,2,1),
-            nn.Sigmoid(),
-        )
-    
-    def forward(self, value):
-        value = self.form(value)
-        value = value.view(-1,1024,4,4)
-        return self.seq(value)
+        self.layers = nn.ModuleList()
 
-class Discriminator(nn.Module):
-    def __init__(self):
-        super(Discriminator, self).__init__()
-        self.seq = nn.Sequential(
-            nn.Conv2d(3,8,4,2,1),
-            nn.BatchNorm2d(8),
-            nn.LeakyReLU(),
-            nn.Conv2d(8,16,4,2,1),
-            nn.BatchNorm2d(16),
-            nn.LeakyReLU(),
-            nn.Conv2d(16,32,4,2,1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(),
-            nn.Conv2d(32,64,4,2,1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.Conv2d(64,128,4,2,1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(),
-            nn.Conv2d(128,256,4,2,1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(),
-            nn.Conv2d(256,512,4,2,1),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(),
-            nn.Conv2d(512,1024,4,2,1),
+        self.layers.append(nn.Sequential(
+            nn.ConvTranspose2d(100, 1024, 4, 1, 0, bias=False),
             nn.BatchNorm2d(1024),
+            nn.LeakyReLU()
+        ))
+
+        for i in range(self.log2(image_size)-3):
+            self.layers.append(self.ConvolutionalTransposeLayer(
+                pow(2, 10 - i), pow(2, 10 - (i+1)), 4, 2, 1))
+
+        self.layers.append(nn.Sequential(
+            nn.ConvTranspose2d(
+                pow(2, 10 - self.log2(image_size) + 3), 3, 4, 2, 1),
+            nn.Tanh()
+        ))
+
+    def log2(self, x):
+        return int(torch.log2(torch.tensor(x)).item())
+
+    def ConvolutionalTransposeLayer(self, input_size, output_size, kernel_size, stride, padding):
+        return nn.Sequential(
+            nn.ConvTranspose2d(input_size, output_size, kernel_size,
+                               stride, padding, bias=False),
+            nn.BatchNorm2d(output_size),
             nn.LeakyReLU(),
         )
-        self.linear = nn.Linear(16384,1)
-        self.sigmoid = nn.Sigmoid()
 
     def forward(self, value):
-        value = self.seq(value)
-        value = value.view(-1,16384)
-        value = self.linear(value)
-        return self.sigmoid(value)
+        output = value
+        for layer in self.layers:
+            output = layer(output)
+        return output
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
-        nn.init.constant_(m.bias.data, 0)
 
-def train(dataloader, epoch):
+class Critic(nn.Module):
+    def __init__(self, image_size):
+        super(Critic, self).__init__()
+        self.layers = nn.ModuleList()
 
-    Dnet = Discriminator()
-    Dnet.train()
-    Dnet.apply(weights_init)
-    Dnet.to(device=device)
-    print(Dnet)
+        self.layers.append(nn.Sequential(
+            nn.Conv2d(3, pow(2, 10 - self.log2(image_size) + 3),
+                      4, 2, 1, bias=False),
+            nn.BatchNorm2d(pow(2, 10 - self.log2(image_size) + 3)),
+            nn.LeakyReLU(),
+        ))
 
-    Gnet = Generator()
-    Gnet.train()
-    Gnet.apply(weights_init)
-    Gnet.to(device=device)
-    print(Gnet)
+        for i in range(self.log2(image_size)-3):
+            self.layers.append(
+                self.ConvolutionalLayer(
+                    pow(2, (10 - self.log2(image_size)) + i + 3), pow(2, (10 - self.log2(image_size)) + i + 4), 4, 2, 1)
+            )
 
-    criterion = nn.BCELoss().to(device=device)
-    optimD = optim.AdamW(Dnet.parameters(), lr=0.0003,betas=(0.5,0.999))
-    optimG = optim.AdamW(Gnet.parameters(), lr=0.0003,betas=(0.5,0.999))
+        self.layers.append(nn.Sequential(
+            nn.Conv2d(1024, 1, 4, 1, 0),
+        ))
 
-    static_noise = torch.randn(batch, 100, device=device)
+    def log2(self, x):
+        return int(torch.log2(torch.tensor(x)).item())
+
+    def ConvolutionalLayer(self, input_size, output_size, kernel_size, stride, padding):
+        return nn.Sequential(
+            nn.Conv2d(input_size, output_size, kernel_size,
+                      stride, padding, bias=False),
+            nn.BatchNorm2d(output_size),
+            nn.LeakyReLU(),
+        )
+
+    def forward(self, value):
+        output = value
+        for layer in self.layers:
+            output = layer(output)
+        return output
+
+
+def initialize_weights(model):
+    for m in model.modules():
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            nn.init.normal_(m.weight.data, 0.0, 0.02)
+        if isinstance(m, (nn.BatchNorm2d)):
+            nn.init.normal_(m.weight.data, 1.0, 0.02)
+            nn.init.constant_(m.bias.data, 0)
+
+
+def train(dataloader, epoch, load=False):
+
+    critic = Critic(IMAGESIZE)
+    if load:
+        critic = torch.load(PATH + "Cnet.pth")
+    critic.train()
+    critic.apply(initialize_weights)
+    critic.to(device=DEVICE)
+    print(critic)
+
+    generator = Generator(IMAGESIZE)
+    if load:
+        generator = torch.load(PATH + "Gnet.pth")
+    generator.train()
+    generator.apply(initialize_weights)
+    generator.to(device=DEVICE)
+    print(generator)
+
+    optim_critic = optim.RMSprop(critic.parameters(), lr=0.00005)
+    optim_generator = optim.RMSprop(generator.parameters(), lr=0.00005)
+
+    static_noise = torch.randn((BATCH, 100, 1, 1), device=DEVICE)
     tensorboard_step = 0
     writer = SummaryWriter("runs/GAN/test")
-    with torch.no_grad():
-        test = Gnet(static_noise).cpu()
-        test_grid = torchvision.utils.make_grid(
-            test[:batch], normalize=True
-        )
-        writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
-        tensorboard_step += 1
 
+    ld = []
+    lg = []
     for i in range(epoch):
         print(f"epoch: {i+1}")
         iter = 0
         for image, _ in tqdm(dataloader):
-            image = image.to(device=device)
-            noise = torch.randn(batch, 100, device=device)
-            fake = Gnet(noise)
+            image = image.to(device=DEVICE)
 
-            disc_real = Dnet(image).reshape(-1)
-            loss_real = criterion(disc_real, torch.ones_like(disc_real)) 
-            disc_fake = Dnet(fake).reshape(-1)
-            loss_fake = criterion(disc_fake, torch.zeros_like(disc_fake))
-            loss = (loss_fake + loss_real)/2   
-            for param in Dnet.parameters():
+            # train critic
+            for _ in range(5):
+                critic_noise = torch.randn((BATCH, 100, 1, 1), device=DEVICE)
+                critic_fake = generator(critic_noise)
+                critic_real = critic(image).reshape(-1)
+                critic_output = critic(critic_fake).reshape(-1)
+
+                # wasserstein loss
+                loss_critic = -(torch.mean(critic_real) -
+                                torch.mean(critic_output))
+
+                ld.append(loss_critic.item())
+                for param in critic.parameters():
+                    param.grad = None
+                loss_critic.backward(retain_graph=True)
+                optim_critic.step()
+
+                # weight clipping
+                for p in critic.parameters():
+                    p.data.clamp_(-0.01, 0.01)
+
+            # train generator
+            generator_noise = torch.randn((BATCH, 100, 1, 1), device=DEVICE)
+            generator_fake = generator(generator_noise)
+            generator_output = critic(generator_fake).reshape(-1)
+            loss_generator = -torch.mean(generator_output)
+            lg.append(loss_generator.item())
+            for param in generator.parameters():
                 param.grad = None
-            loss.backward(retain_graph = True)
-            optimD.step()
-            
-            Dout = Dnet(fake).reshape(-1)
-            loss_Gnet = criterion(Dout,torch.ones_like(Dout))
-            for param in Gnet.parameters():
-                param.grad = None
-            loss_Gnet.backward()
-            optimG.step()
+            loss_generator.backward()
+            optim_generator.step()
             iter += 1
 
-            if iter%100 == 0:
-                with torch.no_grad():
-                    test = Gnet(static_noise).cpu()
-                    test_grid = torchvision.utils.make_grid(
-                        test[:batch], normalize=True
-                    )
-                    writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
-                    tensorboard_step += 1
-        print("saving...")            
-        torch.save(Gnet, PATH)    
-        writer.flush()
-        print("saved")
+            if iter % 50 == 0 or iter == 1:
+                # unnecessary duplicated code
+                logToTensorboard(ld, lg, generator_noise, writer,
+                                 tensorboard_step, generator, image)
+                tensorboard_step += 1
+                ld = []
+                lg = []
 
-    with torch.no_grad():
-        test = Gnet(static_noise).cpu()
-        test_grid = torchvision.utils.make_grid(
-            test[:batch], normalize=True
-        )
-        writer.add_image("TestImage", test_grid, global_step=tensorboard_step)
-        tensorboard_step += 1
-        
-    
+        print("----------------\n\rsaving...")
+        torch.save(generator, PATH + "Gnet.pth")
+        torch.save(critic, PATH + "Cnet.pth")
+        writer.flush()
+        print("saved\n\r----------------")
     writer.flush()
     writer.close()
-    torch.save(Gnet, PATH)
+
+
+def logToTensorboard(ld, lg, static_noise, writer, step, generator, real):
+    with torch.no_grad():
+        writer.add_scalars('current_run', {'loss_Critic': torch.mean(torch.tensor(ld)).item(
+        ), 'loss_Generator': torch.mean(torch.tensor(lg)).item()}, global_step=step)
+        test = generator(static_noise).cpu()
+        test_grid = torchvision.utils.make_grid(
+            test[:BATCH], normalize=True
+        )
+        writer.add_image("TestImage", test_grid, global_step=step)
+        real_grid = torchvision.utils.make_grid(
+            real[:BATCH], normalize=True
+        )
+        writer.add_image("RealImage", real_grid, global_step=step)
+
 
 def start():
-    train(dataloader, 10)
-            
+    train(DATALOADER, 50, load=False)
+
+
 if __name__ == "__main__":
     start()
