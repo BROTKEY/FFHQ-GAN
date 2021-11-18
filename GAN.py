@@ -118,19 +118,15 @@ def initialize_weights(model):
             nn.init.constant_(m.bias.data, 0)
 
 
-def train(dataloader, epoch, load=False):
+def train(dataloader, epoch):
 
     critic = Critic(IMAGESIZE)
-    if load:
-        critic = torch.load(PATH + "Cnet.pth")
     critic.train()
     critic.apply(initialize_weights)
     critic.to(device=DEVICE)
     print(critic)
 
     generator = Generator(IMAGESIZE)
-    if load:
-        generator = torch.load(PATH + "Gnet.pth")
     generator.train()
     generator.apply(initialize_weights)
     generator.to(device=DEVICE)
@@ -215,8 +211,13 @@ def logToTensorboard(ld, lg, static_noise, writer, step, generator, real):
 
 
 def start():
-    train(DATALOADER, 50, load=False)
+    train(DATALOADER, 50)
 
 
 if __name__ == "__main__":
     start()
+
+    if torch.cuda.is_available():
+        print("---\r\nGPU MODE\r\n---")
+    else:
+        print("---\r\nCPU MODE\r\n---")
