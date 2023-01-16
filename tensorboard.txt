@@ -1,1 +1,1 @@
-tensorboard --host=0.0.0.0 --logdir=runs --window_title=FFHQ_GAN
+python3 -m tensorboard.main --host=0.0.0.0 --logdir=runs --window_title=FFHQ_GAN
